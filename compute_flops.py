@@ -114,6 +114,9 @@ def count_model_param_flops(model=None, input_res=224, multiply_adds=True):
 
     total_flops = (sum(list_conv) + sum(list_linear) + sum(list_bn) + sum(list_relu) + sum(list_pooling) + sum(list_upsample))
 
-    print('  + Number of FLOPs: %.2fG' % (total_flops / 1e9))
+    if total_flops>1e8:
+        print('  + Number of FLOPs: %.2fG' % (total_flops / 1e9))
+    else:
+        print('  + Number of FLOPs: %.2fM' % (total_flops / 1e6))
 
     return total_flops
