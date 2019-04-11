@@ -4,20 +4,18 @@ import torch.backends.cudnn as cudnn
 import argparse
 import dataset
 import compute_flops as flops
-# import mask,mask_modify
-import mask as mask
 from utils import AverageMeter, \
     RecorderMeter, time_string, \
     convert_secs2time,print_log,\
     accuracy,adjust_learning_rate,\
     save_checkpoint
-import original_train
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 model_names = sorted(name for name in models.__dict__
                      if name.islower() and not name.startswith("__")
                      and callable(models.__dict__[name]))
+print(model_names)
 parser=argparse.ArgumentParser(description='filter pruning',
                                formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 parser.add_argument('--dataset', type=str, default='cifar10',
@@ -45,12 +43,7 @@ parser.add_argument('--ngpu', type=int, default=1, help='0 = CPU.')
 parser.add_argument('--workers', type=int, default=2, help='number of data loading workers (default: 2)')
 # random seed
 parser.add_argument('--manualSeed', type=int, default=None, help='manual seed')
-# compress rate
-parser.add_argument('--rate', type=float, default=0.8, help='compress rate of model')
-parser.add_argument('--epoch_prune', type=int, default=1, help='compress layer of model')
 parser.add_argument('--use_state_dict', dest='use_state_dict', action='store_true', help='use state dcit or not')
-parser.add_argument('--description',type=str,default='')
-parser.add_argument('--last_index',type=int,default=0)
 
 args=parser.parse_args()
 args.use_cuda = args.ngpu > 0 and torch.cuda.is_available()
@@ -66,15 +59,10 @@ cudnn.benchmark = True
 # args.learning_rate=0.001 # for vgg
 args.arch='resnet32'
 args.dataset='cifar10'
-args.method='my'
-args.rate=0.8
-args.description='{}_{}_{}_{}'.format(args.arch,args.dataset,args.method,args.rate)
+args.description='{}_{}_original'.format(args.arch,args.dataset)
 args.save_path='./{}/'.format(args.description)
 args.resume=args.save_path+'ckpt/'
-args.resume=False
 args.model_save=args.save_path+'model.pth'
-args.last_index=90
-args.original_train=False
 #
 def main():
     # Init logger
@@ -92,8 +80,6 @@ def main():
     print_log("python version : {}".format(sys.version.replace('\n', ' ')), log)
     print_log("torch  version : {}".format(torch.__version__), log)
     print_log("cudnn  version : {}".format(torch.backends.cudnn.version()), log)
-    print_log("Compress Rate: {}".format(args.rate), log)
-    print_log("Epoch prune: {}".format(args.epoch_prune), log)
     print_log("description: {}".format(args.description), log)
 
     # Init data loader
@@ -115,20 +101,20 @@ def main():
         net=models.vgg16_cifar(True,num_classes)
     elif args.arch=='resnet32':
         net=models.resnet32(num_classes)
-    elif args.arch=='resnet56':
-        net=models.resnet56(num_classes)
     elif args.arch=='resnet110':
         net=models.resnet110(num_classes)
     else:
         assert False,'Not finished'
 
-
     print_log("=> network:\n {}".format(net),log)
     net = torch.nn.DataParallel(net, device_ids=list(range(args.ngpu)))
+
     # define loss function (criterion) and optimizer
     criterion = torch.nn.CrossEntropyLoss()
+
     optimizer = torch.optim.SGD(net.parameters(), state['learning_rate'], momentum=state['momentum'],
                                 weight_decay=state['decay'], nesterov=True)
+
     if args.use_cuda:
         net.cuda()
         criterion.cuda()
@@ -136,6 +122,7 @@ def main():
     recorder = RecorderMeter(args.epochs)
     # optionally resume from a checkpoint
     if args.resume:
+        print(args.resume)
         if os.path.isfile(args.resume+'checkpoint.pth.tar'):
             print_log("=> loading checkpoint '{}'".format(args.resume+'checkpoint.pth.tar'), log)
             checkpoint = torch.load(args.resume+'checkpoint.pth.tar')
@@ -159,34 +146,6 @@ def main():
     else:
         print_log("=> not use any checkpoint for {} model".format(args.description), log)
 
-    if args.original_train:
-        original_train.args.arch=args.arch
-        original_train.args.dataset=args.dataset
-        original_train.main()
-        return
-
-    comp_rate=args.rate
-    m=mask.Mask(net,args.use_cuda)
-    print("-" * 10 + "one epoch begin" + "-" * 10)
-    print("the compression rate now is %f" % comp_rate)
-
-    val_acc_1, val_los_1 = validate(test_loader, net, criterion, args.use_cuda,log)
-    print(" accu before is: %.3f %%" % val_acc_1)
-
-    m.model=net
-    print('before pruning')
-    m.init_mask(comp_rate,args.last_index)
-    m.do_mask()
-    print('after pruning')
-    m.print_weights_zero()
-    net=m.model#update net
-
-    if args.use_cuda:
-        net=net.cuda()
-    val_acc_2, val_los_2 = validate(test_loader, net, criterion, args.use_cuda,log)
-    print(" accu after is: %.3f %%" % val_acc_2)
-    #
-
     start_time=time.time()
     epoch_time=AverageMeter()
     for epoch in range(args.start_epoch,args.epochs):
@@ -197,21 +156,8 @@ def main():
             '\n==>>{:s} [Epoch={:03d}/{:03d}] {:s} [learning_rate={:6.4f}]'.format(time_string(), epoch, args.epochs,
                                                                                    need_time, current_learning_rate) \
             + ' [Best : Accuracy={:.2f}]'.format(recorder.max_accuracy(False)), log)
-        train_acc,train_los=train(train_loader,net,criterion,optimizer,epoch,args.use_cuda,log)
-        validate(test_loader, net, criterion,args.use_cuda, log)
-        if (epoch % args.epoch_prune == 0 or epoch == args.epochs - 1):
-            m.model=net
-            print('before pruning')
-            m.print_weights_zero()
-            m.init_mask(comp_rate,args.last_index)
-            m.do_mask()
-            print('after pruning')
-            m.print_weights_zero()
-            net=m.model
-            if args.use_cuda:
-                net=net.cuda()
-
-        val_acc_2, val_los_2 = validate(test_loader, net, criterion,args.use_cuda,log)
+        train_acc, train_los = train(train_loader, net, criterion, optimizer, epoch, args.use_cuda, log)
+        val_acc_2, val_los_2 = validate(test_loader, net, criterion, args.use_cuda, log)
 
         is_best = recorder.update(epoch, train_los, train_acc, val_los_2, val_acc_2)
         if args.resume:
@@ -221,12 +167,11 @@ def main():
                 'recorder': recorder,
                 'optimizer': optimizer.state_dict(),
             }, is_best, args.resume, 'checkpoint.pth.tar')
-        print('save ckpt done')
+            print('save ckpt done')
 
-        epoch_time.update(time.time()-start_time)
-        start_time=time.time()
-    torch.save(net,args.model_save)
-    # torch.save(net,args.save_path)
+        epoch_time.update(time.time() - start_time)
+        start_time = time.time()
+    torch.save(net, args.model_save)
     flops.print_model_param_nums(net)
     flops.count_model_param_flops(net,32,False)
     log.close()
@@ -294,17 +239,15 @@ def validate(val_loader,model,criterion,use_cuda=False,log=None):
     return top1.avg, losses.avg
 
 if __name__ == '__main__':
-    for i in range(1):
-        args.arch='resnet32'
-        args.dataset='cifar10'
-        args.method='sfp'
-        args.rate=0.7
-        args.description='{}_{}_{}_{}_{}'.format(args.arch,args.dataset,args.method,args.rate,i)
-        args.save_path='./{}/'.format(args.description)
-        args.resume=args.save_path+'ckpt/'
+    args.arch='resnet32'
+    args.dataset='cifar10'
+    args.description='{}_{}_original'.format(args.arch,args.dataset)
+    args.save_path='./{}/'.format(args.description)
+    args.resume=args.save_path+'ckpt/'
+    args.model_save=args.save_path+'model.pth'
+    for i in range(5):
         args.resume=False
+        args.description='{}_{}_original_{}'.format(args.arch,args.dataset,i)
+        args.save_path='./{}/'.format(args.description)
         args.model_save=args.save_path+'model.pth'
-        args.last_index=90
-        args.original_train=False
         main()
-

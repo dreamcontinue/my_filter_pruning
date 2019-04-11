@@ -130,7 +130,7 @@ class Mask:
             filter_index = norm2_np.argsort()[:filter_pruned_num]
             kernel_length = weight_torch.size()[1] * weight_torch.size()[2] * weight_torch.size()[3]
             #
-            print('row',np.sort(filter_index))
+            # print('row',np.sort(filter_index))
             #
             for x in range(0, len(filter_index)):
                 codebook[filter_index[x] * kernel_length: (filter_index[x] + 1) * kernel_length] = 0
@@ -151,7 +151,7 @@ class Mask:
             kernel_length = weight_torch_transposed.size()[1] * weight_torch_transposed.size()[2] * \
                             weight_torch_transposed.size()[3]
             #
-            print('col',np.sort(filter_index))
+            # print('col',np.sort(filter_index))
             #
             for x in range(0, len(filter_index)):
                 codebook[filter_index[x] * kernel_length: (filter_index[x] + 1) * kernel_length] = 0

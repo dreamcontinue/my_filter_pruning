@@ -10,23 +10,15 @@ import utils
 # resnet20 54
 # }
 class Mask:
-    def __init__(self, model):
+    def __init__(self, model,use_cuda=True):
         self.model_size = {}
         self.model_length = {}
         self.compress_rate = {}
         self.mat = {}
         self.model = model
         self.mask_index = []
+        self.use_cuda=use_cuda
         self.init_length()
-
-    # 计算conv对应的mask
-    def get_filter_mask(self, weight_torch, compress_rate, length):
-        return self.get_filter_mask_row(weight_torch,compress_rate,length)*\
-               self.get_filter_mask_col(weight_torch,compress_rate,length)
-
-    def convert2tensor(self, x):
-        x = torch.FloatTensor(x)
-        return x
 
     # 初始化每一层的参数长度
     def init_length(self):
@@ -42,7 +34,9 @@ class Mask:
 
 
     # 初始化网络的压缩比率和要压缩层的index
-    def init_rate(self, layer_rate,last_index):
+    def init_rate(self, layer_rate, last_index):
+        self.compress_rate = {}
+        self.mask_index = []
         for index, item in enumerate(self.model.parameters()):
             self.compress_rate[index] = 1
             # simply mask all conv
@@ -50,66 +44,34 @@ class Mask:
                 self.mask_index.append(index)
                 self.compress_rate[index] = layer_rate
 
-
-    def init_mask_row(self, layer_rate,last_index, use_cuda=True):
+    def init_mask(self, layer_rate,last_index):
+        # 初始化横向纵向mask
         self.init_rate(layer_rate,last_index)
         for index, item in enumerate(self.model.parameters()):
             if (index in self.mask_index):
-                self.mat[index]=self.get_filter_mask_row(item.data,self.compress_rate[index],self.model_length[index])
+                self.mat[index]=self.get_filter_mask_row(item.data, self.compress_rate[index],
+                                                           self.model_length[index])
+                                # *\
+                                # self.get_filter_mask_col(item.data, self.compress_rate[index],
+                                #                            self.model_length[index])
         print('init mask')
         self.print_masks_zero()
+
         # 前面横的与后面竖的对应（a,?,?,?）(?,a,?,?)
         self.mask_update_row2col()
         print('row2col')
         self.print_masks_zero()
-        # numpy to tensor
-        for index in self.mask_index:
-            self.mat[index] = self.convert2tensor(self.mat[index])
-            if use_cuda:
-                self.mat[index] = self.mat[index].cuda()
 
-    def init_mask_col(self, layer_rate,last_index, use_cuda=True):
-        self.init_rate(layer_rate,last_index)
-        for index, item in enumerate(self.model.parameters()):
-            if (index in self.mask_index):
-                self.mat[index]=self.get_filter_mask_col(item.data,self.compress_rate[index],self.model_length[index])
-        print('init mask')
-        self.print_masks_zero()
-        # 前面横的与后面竖的对应（a,?,?,?）(?,a,?,?)
-        self.mask_update_col2row()
-        print('col2row')
-        self.print_masks_zero()
-        # numpy to tensor
-        for index in self.mask_index:
-            self.mat[index] = self.convert2tensor(self.mat[index])
-            if use_cuda:
-                self.mat[index] = self.mat[index].cuda()
-
-    # 计算当前网络的mask
-    def init_mask(self, layer_rate,last_index, use_cuda=True):
-        self.init_rate(layer_rate,last_index)
-        # 初始化横向纵向mask
-        for index, item in enumerate(self.model.parameters()):
-            if (index in self.mask_index):
-                self.mat[index] = self.get_filter_mask(item.data, self.compress_rate[index],
-                                                           self.model_length[index])
-        print('init mask')
-        self.print_masks_zero()
         # mask前向后向更新
         # 后面竖的与前面横的对应（?,a,?,?）(a,?,?,?)
-        self.mask_update_col2row()
-        print('col2row')
-        self.print_masks_zero()
-
-        # 前面横的与后面竖的对应（a,?,?,?）(?,a,?,?)
-        self.mask_update_row2col()
-        print('row2col')
-        self.print_masks_zero()
+        # self.mask_update_col2row()
+        # print('col2row')
+        # self.print_masks_zero()
 
         # numpy to tensor
         for index in self.mask_index:
             self.mat[index] = self.convert2tensor(self.mat[index])
-            if use_cuda:
+            if self.use_cuda:
                 self.mat[index] = self.mat[index].cuda()
 
 
@@ -130,7 +92,7 @@ class Mask:
             filter_index = norm2_np.argsort()[:filter_pruned_num]
             kernel_length = weight_torch.size()[1] * weight_torch.size()[2] * weight_torch.size()[3]
             #
-            print('row',filter_index)
+            # print('row',filter_index)
             #
             for x in range(0, len(filter_index)):
                 codebook[filter_index[x] * kernel_length: (filter_index[x] + 1) * kernel_length] = 0
@@ -151,7 +113,7 @@ class Mask:
             kernel_length = weight_torch_transposed.size()[1] * weight_torch_transposed.size()[2] * \
                             weight_torch_transposed.size()[3]
             #
-            print('col',filter_index)
+            # print('col',filter_index)
             #
             for x in range(0, len(filter_index)):
                 codebook[filter_index[x] * kernel_length: (filter_index[x] + 1) * kernel_length] = 0
@@ -185,6 +147,10 @@ class Mask:
                     self.mat[post_index][:,i,:,:]=0
             post_index=index
 
+    def convert2tensor(self, x):
+        x = torch.FloatTensor(x)
+        return x
+
     # 输出网络权重中0的数量
     def print_weights_zero(self):
         non_zeros=utils.AverageMeter()
@@ -196,9 +162,7 @@ class Mask:
                 b = a.cpu().numpy()
                 non_zeros.update(np.count_nonzero(b))
                 zeros.update(b.size-np.count_nonzero(b))
-
-                # print("number of nonzero weight is %d, zero  is %d" % (np.count_nonzero(b), len(b) - np.count_nonzero(b)))
-        print("number of nonzero weight is %d, zero  is %d" % (non_zeros.sum,zeros.sum))
+        print("number of nonzero weight is %d, zero  is %d, %.2f%%" % (non_zeros.sum,zeros.sum,(100*zeros.sum/(non_zeros.sum+zeros.sum))))
 
     # 输出mask中0的数量
     def print_masks_zero(self):
@@ -208,7 +172,7 @@ class Mask:
             a=self.mat[index]
             non_zeros.update(np.count_nonzero(a))
             zeros.update(a.size-np.count_nonzero(a))
-        print("number of nonzero weight is %d, zero  is %d" % (non_zeros.sum,zeros.sum))
+        print("number of nonzero weight is %d, zero  is %d, %.2f%%" % (non_zeros.sum,zeros.sum,(100*zeros.sum/(non_zeros.sum+zeros.sum))))
 
 def print_mask(mask):
     h,w=mask.shape[0:2]
@@ -218,9 +182,3 @@ def print_mask(mask):
             codebook[i,j]=np.count_nonzero(mask[i,j])
     np.set_printoptions(threshold=1000)
     print(codebook)
-
-def print_masks_zeros(mask):
-    non_zeros=np.count_nonzero(mask)
-    zeros=mask.size-non_zeros
-    print("number of nonzero weight is %d, zero  is %d" % (non_zeros, zeros))
-
